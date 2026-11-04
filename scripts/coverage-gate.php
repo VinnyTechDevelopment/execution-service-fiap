@@ -8,7 +8,7 @@
  */
 [$script, $file, $minimum] = $argv + [null, 'coverage.xml', '80'];
 
-if (!is_file($file)) {
+if (! is_file($file)) {
     fwrite(STDERR, "Relatorio de cobertura nao encontrado: {$file}\n");
     exit(1);
 }
