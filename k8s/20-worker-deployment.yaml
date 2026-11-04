@@ -1,0 +1,42 @@
+# Manifestos Kubernetes do execution-service (Fase 4).
+# Em EKS o deploy é feito pelo Terraform em infra/ (mesmos recursos, com
+# valores reais de banco/fila/secret); estes YAMLs documentam a topologia e
+# são validados no CI (kubeconform). Para aplicar manualmente:
+#   kubectl apply -f k8s/
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: execution-worker
+  namespace: execution
+  labels:
+    app: execution-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: execution-worker
+  template:
+    metadata:
+      labels:
+        app: execution-worker
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+        - name: consumer
+          image: ghcr.io/vinnytechdevelopment/execution-service-fiap:latest
+          imagePullPolicy: Always
+          # args (não command): preserva o ENTRYPOINT que injeta a License Key do New Relic
+          args: ["php", "artisan", "messaging:consume"]
+          env:
+            - name: NEWRELIC_APPNAME
+              value: "execution-service (worker)"
+          envFrom:
+            - configMapRef:
+                name: execution-config
+            - secretRef:
+                name: execution-secret
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 250m, memory: 256Mi }

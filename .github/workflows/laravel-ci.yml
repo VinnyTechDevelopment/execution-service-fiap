@@ -1,0 +1,135 @@
+name: Laravel CI
+
+# Pipeline de qualidade do execution-service (Fase 4). Os nomes dos jobs são os
+# "status checks" exigidos pela proteção da branch main. Em push para
+# main/homologacao, o sucesso deste workflow dispara o build da imagem
+# (build-ghcr.yml), que por sua vez dispara o deploy no EKS (deploy-eks.yml).
+
+on:
+  push:
+    branches: [main, homologacao]
+  pull_request:
+    branches: [main, homologacao]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (Pint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          tools: composer:v2
+          coverage: none
+
+      - name: Instalar dependências
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Pint
+        run: vendor/bin/pint --test
+
+  tests:
+    name: Testes + cobertura (>= 80%)
+    runs-on: ubuntu-latest
+    env:
+      DB_CONNECTION: sqlite
+      DB_DATABASE: ":memory:"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: pdo_mysql, pdo_sqlite, bcmath, pcntl
+          tools: composer:v2
+          coverage: pcov
+
+      - name: Instalar dependências
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Preparar ambiente de teste
+        run: cp .env.testing .env
+
+      - name: Testes unitários e de integração (PHPUnit)
+        run: vendor/bin/phpunit --coverage-clover coverage.xml --log-junit junit.xml
+
+      - name: Gate de cobertura (mínimo 80%)
+        run: php scripts/coverage-gate.php coverage.xml 80
+
+      - name: Publicar relatórios
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            coverage.xml
+            junit.xml
+
+  quality:
+    name: Qualidade (SonarCloud)
+    runs-on: ubuntu-latest
+    needs: tests
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-reports
+
+      - name: Aviso — SONAR_TOKEN não configurado
+        if: env.SONAR_TOKEN == ''
+        run: echo "::warning::SONAR_TOKEN ausente — análise do SonarCloud não executada. Ver README, seção Qualidade."
+
+      - name: Análise SonarCloud (com quality gate)
+        if: env.SONAR_TOKEN != ''
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          args: >
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300
+
+  k8s-manifests:
+    name: Manifestos Kubernetes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+
+      - name: Validar k8s/
+        run: kubeconform -strict -summary -ignore-missing-schemas k8s/
+
+  docker:
+    name: Build da imagem
+    runs-on: ubuntu-latest
+    needs: [lint, tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (sem push — publicação é feita pelo build-ghcr.yml)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

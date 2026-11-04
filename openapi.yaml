@@ -1,0 +1,1329 @@
+openapi: 3.0.3
+info:
+  title: execution-service — Execução e Produção
+  version: 4.0.0
+  description: 'Catálogo de serviços/peças, estoque (DynamoDB) e fila de execução da OS (diagnóstico e reparo).
+
+
+    Autenticação: JWT de funcionário emitido pelo os-service (`POST /api/auth/login`), enviado como `Authorization: Bearer`.
+
+
+    Mensageria (SQS): consome `execution-commands` (`execution.ReservePartsAndEnqueue`, `execution.CancelExecution`) e publica
+    em `os-saga-replies`.'
+servers:
+- url: http://localhost:8083/api
+  description: Local (docker-compose.microservices.yml)
+- url: https://{gateway}/api
+  description: API Gateway
+  variables:
+    gateway:
+      default: xxxx.execute-api.us-east-1.amazonaws.com
+tags:
+- name: Catálogo — Peças
+- name: Catálogo — Serviços
+- name: Execução
+paths:
+  /catalog/items:
+    get:
+      tags:
+      - Catálogo — Peças
+      summary: Listar peças e insumos
+      description: Retorna uma lista paginada. Pode ser filtrado por `type` (`part` ou `supply`).
+      operationId: item-list
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: page
+        in: query
+        schema:
+          type: integer
+          default: 1
+          minimum: 1
+      - name: perPage
+        in: query
+        schema:
+          type: integer
+          default: 10
+          minimum: 1
+          maximum: 100
+      - name: type
+        in: query
+        description: Filtrar por tipo — `part` (peça) ou `supply` (insumo)
+        schema:
+          type: string
+          enum:
+          - part
+          - supply
+      responses:
+        '200':
+          description: Lista retornada com sucesso
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Item'
+              example:
+              - id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                name: Oil filter
+                code: FLT-001
+                type: part
+                description: Oil filter for 1.0 engine
+                measure_unit: un
+                stock_quantity: 15.0
+                minimum_quantity: 5.0
+                unit_price: 25.9
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          description: Parâmetro de filtro inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErroValidacao'
+    post:
+      tags:
+      - Catálogo — Peças
+      summary: Cadastrar peça ou insumo
+      description: 'Cadastra um novo item no almoxarifado. O estoque inicial é sempre **zero**.
+
+        Para adicionar estoque, utilize `POST /item/{id}/stock/entry` após o cadastro.'
+      operationId: item-create
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateItemRequest'
+            example:
+              name: Oil filter
+              code: FLT-001
+              type: part
+              measure_unit: un
+              minimum_quantity: 5
+              description: Oil filter for 1.0 engine
+              unit_price: 25.9
+      responses:
+        '201':
+          description: Item cadastrado com sucesso
+          content:
+            application/json:
+              example:
+                id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                message: Item registered successfully.
+        '422':
+          description: Erro de validação
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErroValidacao'
+              example:
+                code:
+                - The code field already exists.
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+  /catalog/items/{id}:
+    get:
+      tags:
+      - Catálogo — Peças
+      summary: Obter detalhes de uma peça ou insumo
+      description: Inclui o indicador `is_low_stock` (verdadeiro quando `stock_quantity <= minimum_quantity`).
+      operationId: item-show
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: Detalhes retornados com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ItemDetail'
+              example:
+                id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                name: Oil filter
+                code: FLT-001
+                type: part
+                description: Oil filter for 1.0 engine
+                measure_unit: un
+                stock_quantity: 3.0
+                minimum_quantity: 5.0
+                unit_price: 25.9
+                is_low_stock: true
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+    put:
+      tags:
+      - Catálogo — Peças
+      summary: Atualizar peça ou insumo
+      description: 'Todos os campos são opcionais — envie apenas os que deseja alterar.
+
+        Para alterar o estoque, utilize os endpoints de stock entry/withdrawal.'
+      operationId: item-update
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateItemRequest'
+            example:
+              name: Synthetic oil filter
+              minimum_quantity: 8
+              unit_price: 34.9
+      responses:
+        '200':
+          description: Item atualizado com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  item:
+                    $ref: '#/components/schemas/ItemDetail'
+                  message:
+                    type: string
+              example:
+                item:
+                  id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                  name: Synthetic oil filter
+                  code: FLT-001
+                  type: part
+                  description: Oil filter for 1.0 engine
+                  measure_unit: un
+                  stock_quantity: 3.0
+                  minimum_quantity: 8.0
+                  unit_price: 34.9
+                  is_low_stock: true
+                message: Item updated successfully.
+        '422':
+          description: Erro de validação
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErroValidacao'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+    delete:
+      tags:
+      - Catálogo — Peças
+      summary: Remover peça ou insumo
+      description: 'Remove permanentemente um item.
+
+        **Regra de negócio:** itens com `stock_quantity > 0` não podem ser excluídos.'
+      operationId: item-delete
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: Item removido com sucesso
+          content:
+            application/json:
+              example:
+                message: Item removed successfully.
+        '409':
+          description: Não é possível excluir item com estoque disponível
+          content:
+            application/json:
+              example:
+                message: Cannot delete an item with available stock.
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /catalog/items/{id}/stock/entry:
+    post:
+      tags:
+      - Catálogo — Peças
+      summary: Registrar entrada de estoque
+      description: 'Adiciona quantidade ao estoque e registra o movimento com audit trail
+
+        (quantidade anterior e posterior).'
+      operationId: stock-entry
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StockMovementRequest'
+            example:
+              quantity: 10
+              reason: Purchase NF 12345
+              notes: 'Supplier: Auto Parts Ltd'
+      responses:
+        '201':
+          description: Entrada registrada com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StockMovementResponse'
+              example:
+                movement_id: f1e2d3c4-b5a6-7890-fedc-ba0987654321
+                type: entry
+                quantity: 10.0
+                previous_quantity: 3.0
+                current_quantity: 13.0
+                message: Stock entry registered successfully.
+        '422':
+          description: Erro de validação
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErroValidacao'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /catalog/items/{id}/stock/withdrawal:
+    post:
+      tags:
+      - Catálogo — Peças
+      summary: Registrar saída de estoque
+      description: 'Remove quantidade do estoque e registra o movimento.
+
+        **Regra de negócio:** a quantidade solicitada não pode exceder o estoque disponível.'
+      operationId: stock-withdrawal
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StockMovementRequest'
+            example:
+              quantity: 2
+              reason: 'Used in WO #987'
+              notes: Vehicle Toyota Corolla ABC1D23
+      responses:
+        '201':
+          description: Saída registrada com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StockMovementResponse'
+              example:
+                movement_id: c4d3e2f1-a6b5-0987-cdfe-ab1234567890
+                type: withdrawal
+                quantity: 2.0
+                previous_quantity: 13.0
+                current_quantity: 11.0
+                message: Stock withdrawal registered successfully.
+        '422':
+          description: Estoque insuficiente ou erro de validação
+          content:
+            application/json:
+              example:
+                message: 'Insufficient stock. Available: 3, requested: 5.'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /catalog/items/{id}/stock/movements:
+    get:
+      tags:
+      - Catálogo — Peças
+      summary: Listar histórico de movimentações
+      description: Retorna o histórico paginado de movimentações, ordenado da mais recente para a mais antiga.
+      operationId: stock-movements
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/PathId'
+      - name: page
+        in: query
+        schema:
+          type: integer
+          default: 1
+          minimum: 1
+      - name: perPage
+        in: query
+        schema:
+          type: integer
+          default: 20
+          minimum: 1
+          maximum: 100
+      responses:
+        '200':
+          description: Histórico retornado com sucesso
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/StockMovement'
+              example:
+              - id: f1e2d3c4-b5a6-7890-fedc-ba0987654321
+                item_id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                movement_type: entry
+                quantity: '10.000'
+                previous_quantity: '3.000'
+                current_quantity: '13.000'
+                reason: Purchase NF 12345
+                notes: 'Supplier: Auto Parts Ltd'
+                created_user_id: 1
+                created_at: '2026-04-08T14:30:00.000000Z'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /catalog/services:
+    get:
+      tags:
+      - Catálogo — Serviços
+      summary: Listar serviços
+      description: 'Retorna uma lista de serviços cadastrados.
+
+
+        Quando os parâmetros `page` e `per_page` são informados, a API aplica limite de resultados, mas a resposta continua
+        sendo um array simples.
+
+
+        **Requer autenticação.**'
+      operationId: service-list
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: page
+        in: query
+        description: Página desejada para consulta
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          example: 1
+      - name: per_page
+        in: query
+        description: Quantidade de itens por página quando `page` for informado
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          example: 10
+      responses:
+        '200':
+          description: Lista de serviços retornada com sucesso
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ServicoListaItem'
+              example:
+              - id: 550e8400-e29b-41d4-a716-446655440010
+                name: Troca de óleo
+                price: '199.90'
+                created_user_id: 1
+                updated_user_id: 1
+                created_at: '2026-04-05T12:00:00.000000Z'
+                updated_at: '2026-04-05T12:00:00.000000Z'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+    post:
+      tags:
+      - Catálogo — Serviços
+      summary: Criar novo serviço
+      description: 'Cadastra um novo serviço.
+
+
+        O nome do serviço deve ser único.
+
+
+        **Requer autenticação.**'
+      operationId: service-create
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CriarServicoRequest'
+            example:
+              name: Troca de óleo
+              price: 199.9
+      responses:
+        '200':
+          description: Serviço cadastrado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CriarServicoResponse'
+              example:
+                id: 550e8400-e29b-41d4-a716-446655440010
+                message: Serviço cadastrado com sucesso
+        '400':
+          description: Erro de regra de negócio ao cadastrar serviço
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErroNegocio'
+              example:
+                error: Serviço já cadastrado
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          $ref: '#/components/responses/ErroValidacaoLaravel'
+  /catalog/services/{id}:
+    get:
+      tags:
+      - Catálogo — Serviços
+      summary: Obter detalhes do serviço
+      description: 'Retorna os dados de um serviço específico a partir do seu identificador.
+
+
+        **Requer autenticação.**'
+      operationId: service-show
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: ID do serviço em formato UUID
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Serviço retornado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Servico'
+              example:
+                id: 550e8400-e29b-41d4-a716-446655440010
+                name: Troca de óleo
+                price: '199.90'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+    put:
+      tags:
+      - Catálogo — Serviços
+      summary: Atualizar serviço
+      description: 'Atualiza os dados de um serviço existente.
+
+
+        O identificador do serviço é enviado na rota. Os campos `name` e `price` são opcionais, mas pelo menos um deles deve
+        ser informado para efetivar a atualização.
+
+
+        **Requer autenticação.**'
+      operationId: service-update
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: ID do serviço em formato UUID
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AtualizarServicoRequest'
+            example:
+              name: Troca de óleo premium
+              price: 249.9
+      responses:
+        '200':
+          description: Serviço atualizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AtualizarServicoResponse'
+              example:
+                service:
+                  id: 550e8400-e29b-41d4-a716-446655440010
+                  name: Troca de óleo premium
+                  price: '249.90'
+                message: Serviço atualizado com sucesso
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          $ref: '#/components/responses/ErroValidacaoLaravel'
+    delete:
+      tags:
+      - Catálogo — Serviços
+      summary: Remover serviço
+      operationId: service-delete
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: ID do serviço em formato UUID
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '204':
+          description: Serviço removido com sucesso
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          $ref: '#/components/responses/ErroNegocio'
+  /catalog/lookup:
+    post:
+      tags:
+      - Catálogo — Serviços
+      summary: Valida e precifica serviços/peças (consulta síncrona do os-service ao abrir a OS)
+      security: &id001
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - services
+              properties:
+                services:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      service_id:
+                        type: string
+                      quantity:
+                        type: number
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      item_id:
+                        type: string
+                      quantity:
+                        type: number
+      responses:
+        '200':
+          description: Linhas com nome e preço vigentes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  services:
+                    type: array
+                    items:
+                      type: object
+                  items:
+                    type: array
+                    items:
+                      type: object
+        '422': &id003
+          description: Regra de negócio violada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErroNegocio'
+        '401': &id002
+          description: Não autenticado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErroAutenticacao'
+  /execution/queue:
+    get:
+      tags:
+      - Execução
+      summary: Fila de execução (ativas, mais antigas primeiro)
+      security: *id001
+      parameters:
+      - name: status
+        in: query
+        schema:
+          type: string
+          enum:
+          - queued
+          - in_diagnosis
+          - in_repair
+          - finished
+          - cancelled
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ExecutionJob'
+                  total:
+                    type: integer
+        '401': *id002
+  /execution/metrics/average-execution-time:
+    get:
+      tags:
+      - Execução
+      summary: Tempo médio de execução por serviço (minutos)
+      security: *id001
+      responses:
+        '200':
+          description: OK
+        '401': *id002
+  /execution/{serviceOrderId}:
+    get:
+      tags:
+      - Execução
+      summary: Situação da OS na execução
+      security: *id001
+      parameters:
+      - &id004
+        name: serviceOrderId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200': &id005
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  execution:
+                    $ref: '#/components/schemas/ExecutionJob'
+                  message:
+                    type: string
+        '422': *id003
+  /execution/{serviceOrderId}/diagnosis:
+    patch:
+      tags:
+      - Execução
+      summary: Inicia o diagnóstico (publica ExecutionStatusChanged)
+      security: *id001
+      parameters:
+      - *id004
+      requestBody: &id006
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                notes:
+                  type: string
+      responses:
+        '200': *id005
+        '422': *id003
+  /execution/{serviceOrderId}/repair:
+    patch:
+      tags:
+      - Execução
+      summary: Inicia o reparo (publica ExecutionStatusChanged)
+      security: *id001
+      parameters:
+      - *id004
+      requestBody: *id006
+      responses:
+        '200': *id005
+        '422': *id003
+  /execution/{serviceOrderId}/finish:
+    patch:
+      tags:
+      - Execução
+      summary: Finaliza a execução (publica ExecutionFinished para o os-service)
+      security: *id001
+      parameters:
+      - *id004
+      requestBody: *id006
+      responses:
+        '200': *id005
+        '422': *id003
+  /execution/{serviceOrderId}/services/{serviceId}/start:
+    patch:
+      tags:
+      - Execução
+      summary: Apontamento de início de um serviço (métrica de tempo médio)
+      security: *id001
+      parameters:
+      - *id004
+      - &id007
+        name: serviceId
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200': *id005
+        '422': *id003
+  /execution/{serviceOrderId}/services/{serviceId}/finish:
+    patch:
+      tags:
+      - Execução
+      summary: Apontamento de fim de um serviço (métrica de tempo médio)
+      security: *id001
+      parameters:
+      - *id004
+      - *id007
+      responses:
+        '200': *id005
+        '422': *id003
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token JWT obtido via `POST /auth/login` ou `POST /auth/refresh`
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      description: Identificador único do recurso (UUID)
+      schema:
+        type: string
+        format: uuid
+        example: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+  schemas:
+    ExecutionJob:
+      type: object
+      properties:
+        service_order_id:
+          type: string
+          format: uuid
+        saga_id:
+          type: string
+        status:
+          type: string
+          enum:
+          - queued
+          - in_diagnosis
+          - in_repair
+          - finished
+          - cancelled
+        services:
+          type: array
+          items:
+            type: object
+            properties:
+              service_id:
+                type: string
+              name:
+                type: string
+              quantity:
+                type: number
+              started_at:
+                type: string
+                nullable: true
+              finished_at:
+                type: string
+                nullable: true
+        reservations:
+          type: array
+          items:
+            type: object
+            properties:
+              item_id:
+                type: string
+              quantity:
+                type: number
+        queued_at:
+          type: string
+          format: date-time
+        diagnosis_started_at:
+          type: string
+          nullable: true
+        repair_started_at:
+          type: string
+          nullable: true
+        finished_at:
+          type: string
+          nullable: true
+        cancelled_at:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+    Item:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+        name:
+          type: string
+          description: Nome descritivo do item
+          example: Oil filter
+        code:
+          type: string
+          pattern: ^[A-Z0-9\-]{2,30}$
+          description: Código único (SKU) — letras maiúsculas, números e hifens
+          example: FLT-001
+        type:
+          type: string
+          enum:
+          - part
+          - supply
+          description: '`part` = peça, `supply` = insumo'
+          example: part
+        description:
+          type: string
+          nullable: true
+          description: Descrição detalhada do item
+          example: Oil filter for 1.0 engine
+        measure_unit:
+          type: string
+          enum:
+          - un
+          - kg
+          - g
+          - l
+          - ml
+          - m
+          - cm
+          - cx
+          - pair
+          - pc
+          description: Unidade de medida para controle de estoque
+          example: un
+        stock_quantity:
+          type: number
+          format: float
+          description: Quantidade atual em estoque
+          example: 15.0
+        minimum_quantity:
+          type: number
+          format: float
+          description: Quantidade mínima — abaixo deste valor o estoque é considerado baixo
+          example: 5.0
+        unit_price:
+          type: number
+          format: float
+          nullable: true
+          description: Preço unitário de referência
+          example: 25.9
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ErroValidacao:
+      type: object
+      description: Mapa de erros de validação por campo
+      additionalProperties:
+        type: array
+        items:
+          type: string
+      example:
+        field:
+        - Validation error message.
+    CreateItemRequest:
+      type: object
+      required:
+      - name
+      - code
+      - type
+      - measure_unit
+      - minimum_quantity
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          example: Oil filter
+        code:
+          type: string
+          pattern: ^[A-Z0-9\-]{2,30}$
+          maxLength: 30
+          description: Convertido para maiúsculas automaticamente
+          example: FLT-001
+        type:
+          type: string
+          enum:
+          - part
+          - supply
+          example: part
+        measure_unit:
+          type: string
+          enum:
+          - un
+          - kg
+          - g
+          - l
+          - ml
+          - m
+          - cm
+          - cx
+          - pair
+          - pc
+          example: un
+        minimum_quantity:
+          type: number
+          format: float
+          minimum: 0
+          example: 5
+        description:
+          type: string
+          nullable: true
+          example: Oil filter for 1.0 engine
+        unit_price:
+          type: number
+          format: float
+          minimum: 0
+          nullable: true
+          example: 25.9
+    ItemDetail:
+      allOf:
+      - $ref: '#/components/schemas/Item'
+      - type: object
+        properties:
+          is_low_stock:
+            type: boolean
+            description: Verdadeiro quando stock_quantity <= minimum_quantity
+            example: false
+    UpdateItemRequest:
+      type: object
+      description: Todos os campos são opcionais
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          example: Synthetic oil filter
+        code:
+          type: string
+          pattern: ^[A-Z0-9\-]{2,30}$
+          maxLength: 30
+          example: FLT-001-SYN
+        type:
+          type: string
+          enum:
+          - part
+          - supply
+          example: part
+        measure_unit:
+          type: string
+          enum:
+          - un
+          - kg
+          - g
+          - l
+          - ml
+          - m
+          - cm
+          - cx
+          - pair
+          - pc
+          example: un
+        minimum_quantity:
+          type: number
+          format: float
+          minimum: 0
+          example: 8
+        description:
+          type: string
+          nullable: true
+          example: Synthetic oil filter for 1.0 engine
+        unit_price:
+          type: number
+          format: float
+          minimum: 0
+          nullable: true
+          example: 34.9
+    StockMovementRequest:
+      type: object
+      required:
+      - quantity
+      - reason
+      properties:
+        quantity:
+          type: number
+          format: float
+          minimum: 0.001
+          description: Quantidade a movimentar (deve ser maior que zero)
+          example: 10
+        reason:
+          type: string
+          maxLength: 255
+          description: Motivo da movimentação (exemplo número de NF, número de OS)
+          example: Purchase NF 12345
+        notes:
+          type: string
+          nullable: true
+          description: Observação adicional opcional
+          example: 'Supplier: Auto Parts Ltd'
+    StockMovementResponse:
+      type: object
+      properties:
+        movement_id:
+          type: string
+          format: uuid
+          example: f1e2d3c4-b5a6-7890-fedc-ba0987654321
+        type:
+          type: string
+          enum:
+          - entry
+          - withdrawal
+          example: entry
+        quantity:
+          type: number
+          format: float
+          example: 10.0
+        previous_quantity:
+          type: number
+          format: float
+          description: Saldo antes da movimentação
+          example: 3.0
+        current_quantity:
+          type: number
+          format: float
+          description: Saldo após a movimentação
+          example: 13.0
+        message:
+          type: string
+          example: Stock entry registered successfully.
+    StockMovement:
+      type: object
+      description: Registro histórico de uma movimentação de estoque
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: f1e2d3c4-b5a6-7890-fedc-ba0987654321
+        item_id:
+          type: string
+          format: uuid
+          example: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+        service_order_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: ID da OS que originou a saída (preenchido apenas em baixas automáticas por aprovação de orçamento)
+          example: b1c2d3e4-f5a6-7890-bcde-f01234567890
+        movement_type:
+          type: string
+          enum:
+          - entry
+          - withdrawal
+          example: entry
+        quantity:
+          type: string
+          example: '10.000'
+        previous_quantity:
+          type: string
+          example: '3.000'
+        current_quantity:
+          type: string
+          example: '13.000'
+        reason:
+          type: string
+          example: Purchase NF 12345
+        notes:
+          type: string
+          nullable: true
+          example: 'Supplier: Auto Parts Ltd'
+        created_user_id:
+          type: integer
+          example: 1
+        created_at:
+          type: string
+          format: date-time
+          example: '2026-04-08T14:30:00.000000Z'
+    ServicoListaItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Identificador único do serviço
+          example: 550e8400-e29b-41d4-a716-446655440010
+        name:
+          type: string
+          description: Nome do serviço
+          example: Troca de óleo
+        price:
+          type: string
+          description: Valor persistido do serviço
+          example: '199.90'
+        created_user_id:
+          type: integer
+          description: Identificador do usuário que criou o registro
+          example: 1
+        updated_user_id:
+          type: integer
+          description: Identificador do usuário que atualizou o registro
+          example: 1
+        created_at:
+          type: string
+          format: date-time
+          description: Data de criação do registro
+          example: '2026-04-05T12:00:00.000000Z'
+        updated_at:
+          type: string
+          format: date-time
+          description: Data da última atualização do registro
+          example: '2026-04-05T12:00:00.000000Z'
+    CriarServicoRequest:
+      type: object
+      required:
+      - name
+      - price
+      properties:
+        name:
+          type: string
+          description: Nome do serviço
+          example: Troca de óleo
+        price:
+          type: number
+          format: float
+          description: Valor do serviço
+          example: 199.9
+    CriarServicoResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Identificador único do serviço criado
+          example: 550e8400-e29b-41d4-a716-446655440010
+        message:
+          type: string
+          description: Mensagem de confirmação
+          example: Serviço cadastrado com sucesso
+    ErroNegocio:
+      type: object
+      properties:
+        message:
+          type: string
+          description: Mensagem de erro de regra de negócio
+          example: Servico '00000000-0000-0000-0000-000000000000' nao encontrado.
+    Servico:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Identificador único do serviço
+          example: 550e8400-e29b-41d4-a716-446655440010
+        name:
+          type: string
+          description: Nome do serviço
+          example: Troca de óleo
+        price:
+          type: string
+          description: Valor do serviço
+          example: '199.90'
+        created_user_id:
+          type: integer
+          description: Identificador do usuário que criou o registro
+          example: 1
+        updated_user_id:
+          type: integer
+          description: Identificador do usuário que atualizou o registro
+          example: 1
+        created_at:
+          type: string
+          format: date-time
+          example: '2026-04-05T12:00:00.000000Z'
+        updated_at:
+          type: string
+          format: date-time
+          example: '2026-04-05T12:00:00.000000Z'
+    AtualizarServicoRequest:
+      type: object
+      description: Todos os campos são opcionais
+      properties:
+        name:
+          type: string
+          description: Nome do serviço
+          example: Troca de óleo
+        price:
+          type: number
+          format: float
+          description: Valor do serviço
+          example: 199.9
+    AtualizarServicoResponse:
+      type: object
+      properties:
+        service:
+          $ref: '#/components/schemas/Servico'
+        message:
+          type: string
+          description: Mensagem de confirmação
+          example: Serviço atualizado com sucesso
+    ErroAutenticacao:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Credenciais inválidas
+  responses:
+    NaoAutenticado:
+      description: Token ausente, inválido ou expirado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErroAutenticacao'
+          example:
+            message: Token inválido ou expirado
+    NaoEncontrado:
+      description: Recurso não encontrado
+      content:
+        application/json:
+          example:
+            message: Resource not found.
+    ErroValidacaoLaravel:
+      description: Erro de validação da requisição
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+                example: The given data was invalid.
+              errors:
+                type: object
+                additionalProperties:
+                  type: array
+                  items:
+                    type: string
+          example:
+            message: The given data was invalid.
+            errors:
+              name:
+              - O campo name é obrigatório.
+              price:
+              - O campo price deve ser numérico.
+    ErroNegocio:
+      description: Regra de negócio violada ou recurso não encontrado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErroNegocio'
+          example:
+            message: Servico '00000000-0000-0000-0000-000000000000' nao encontrado.

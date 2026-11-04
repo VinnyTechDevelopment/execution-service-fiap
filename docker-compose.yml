@@ -1,0 +1,51 @@
+# Ambiente local isolado do execution-service (API + worker + LocalStack com
+# SQS e DynamoDB + Swagger). Para os 3 microsserviços juntos, use o
+# docker-compose.microservices.yml do os-service (tech-challenge-fiap).
+x-env: &env
+  APP_NAME: execution-service
+  APP_ENV: local
+  APP_DEBUG: "true"
+  APP_KEY: base64:Wm9vcGVyLWRldi1rZXktZXhlY3V0aW9uLXNlcnZpY2U=
+  LOG_CHANNEL: stderr
+  DB_CONNECTION: sqlite
+  CACHE_STORE: file
+  SESSION_DRIVER: array
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ENDPOINT_URL: http://localstack:4566
+  DYNAMODB_TABLE_PREFIX: local-execution
+  MESSAGING_DRIVER: sqs
+  MESSAGING_QUEUE_PREFIX: local
+  JWT_SECRET: dev-staff-jwt-secret-troque-em-producao-0123456789abcdef
+
+services:
+  app:
+    build: .
+    image: local/execution-service
+    ports: ["8083:8000"]
+    environment: *env
+    command: ["sh", "-c", "php artisan dynamodb:create-tables && php artisan serve --host=0.0.0.0 --port=8000"]
+    depends_on:
+      localstack: { condition: service_healthy }
+
+  worker:
+    image: local/execution-service
+    restart: on-failure
+    environment: *env
+    command: ["php", "artisan", "messaging:consume"]
+    depends_on: [app]
+
+  localstack:
+    image: localstack/localstack:3.8
+    environment: { SERVICES: "sqs,dynamodb" }
+    volumes:
+      - ./docker/localstack-init.sh:/etc/localstack/init/ready.d/init.sh:ro
+    healthcheck:
+      test: ["CMD", "sh", "-c", "awslocal sqs get-queue-url --queue-name local-execution-commands"]
+      interval: 5s
+      retries: 30
+
+  swagger-ui:
+    image: swaggerapi/swagger-ui
+    ports: ["8085:8080"]
+    environment: { SWAGGER_JSON: /app/openapi.yaml }
+    volumes: ["./openapi.yaml:/app/openapi.yaml:ro"]
