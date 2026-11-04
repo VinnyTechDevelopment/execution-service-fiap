@@ -8,8 +8,8 @@ name: Laravel CI
 on:
   push:
     branches: [main, homologacao]
+  # Qualquer PR (inclusive PRs empilhados sobre outra branch).
   pull_request:
-    branches: [main, homologacao]
 
 permissions:
   contents: read
