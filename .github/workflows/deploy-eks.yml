@@ -1,0 +1,133 @@
+name: Deploy infra (EKS)
+
+# Deploy automático do execution-service: "main" -> produção (namespace "execution"),
+# "homologacao" -> homologação (namespace "execution-homolog"). Disparado quando o
+# build da imagem termina (workflow_run), com a tag sha-<7 chars> publicada.
+# Em PR (infra/**) roda só o terraform plan.
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ["infra/**"]
+  workflow_run:
+    workflows: ["Build and Publish Docker image (GHCR)"]
+    types: [completed]
+    branches: [main, homologacao]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag da imagem a implantar"
+        required: true
+        default: "latest"
+      environment:
+        description: "Ambiente de destino"
+        type: choice
+        options: [production, homolog]
+        default: production
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+      AWS_REGION: us-east-1
+      TF_VAR_tf_state_bucket: ${{ secrets.TF_STATE_BUCKET }}
+      TF_VAR_app_key: ${{ secrets.EXECUTION_APP_KEY }}
+      TF_VAR_jwt_secret: ${{ secrets.JWT_SECRET }}
+      TF_VAR_newrelic_license_key: ${{ secrets.NEWRELIC_LICENSE_KEY }}
+      TF_VAR_ghcr_username: ${{ secrets.GHCR_USERNAME }}
+      TF_VAR_ghcr_token: ${{ secrets.GHCR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Resolve ambiente (branch -> namespace/state/tag)
+        id: env
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            branch="${{ github.event.workflow_run.head_branch }}"
+            short_sha="$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-7)"
+            image_tag="sha-${short_sha}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            [ "${{ github.event.inputs.environment }}" = "homolog" ] && branch="homologacao" || branch="main"
+            short_sha="$(echo "${{ github.sha }}" | cut -c1-7)"
+            image_tag="${{ github.event.inputs.image_tag }}"
+          else
+            branch="main"
+            short_sha="$(echo "${{ github.sha }}" | cut -c1-7)"
+            image_tag="latest"
+          fi
+
+          if [ "$branch" = "homologacao" ]; then
+            echo "environment=homolog" >> "$GITHUB_OUTPUT"
+            echo "namespace=execution-homolog" >> "$GITHUB_OUTPUT"
+            echo "state_key=execution/homolog/terraform.tfstate" >> "$GITHUB_OUTPUT"
+          else
+            echo "environment=production" >> "$GITHUB_OUTPUT"
+            echo "namespace=execution" >> "$GITHUB_OUTPUT"
+            echo "state_key=execution/production/terraform.tfstate" >> "$GITHUB_OUTPUT"
+          fi
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+          echo "image_repository=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Verificar secrets obrigatórios
+        run: |
+          missing=""
+          for var in TF_VAR_app_key TF_VAR_jwt_secret TF_VAR_newrelic_license_key; do
+            [ -n "${!var}" ] || missing="$missing $var"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Secrets ausentes:$missing"
+            exit 1
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Terraform Init
+        run: >
+          terraform init
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
+          -backend-config="key=${{ steps.env.outputs.state_key }}"
+          -backend-config="region=us-east-1"
+          -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}"
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        if: github.event_name == 'pull_request'
+        run: terraform plan -no-color
+
+      - name: Terraform Apply
+        if: github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch'
+        env:
+          TF_VAR_namespace: ${{ steps.env.outputs.namespace }}
+          TF_VAR_environment: ${{ steps.env.outputs.environment }}
+          TF_VAR_image_tag: ${{ steps.env.outputs.image_tag }}
+          TF_VAR_image_repository: ${{ steps.env.outputs.image_repository }}
+          TF_VAR_rollout_id: ${{ steps.env.outputs.short_sha }}
+        run: terraform apply -auto-approve
+
+      - name: Resumo do deploy
+        if: github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch'
+        run: |
+          {
+            echo "### Deploy execution-service — ${{ steps.env.outputs.environment }}"
+            echo ""
+            echo "- Imagem: \`${{ steps.env.outputs.image_repository }}:${{ steps.env.outputs.image_tag }}\`"
+            echo "- Namespace: \`${{ steps.env.outputs.namespace }}\`"
+            echo "- Load Balancer: \`$(terraform output -raw load_balancer_hostname 2>/dev/null || echo pendente)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
