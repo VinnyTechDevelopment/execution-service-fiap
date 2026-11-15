@@ -1,0 +1,47 @@
+# Manifestos Kubernetes do execution-service (Fase 4).
+# Em EKS o deploy é feito pelo Terraform em infra/ (mesmos recursos, com
+# valores reais de banco/fila/secret); estes YAMLs documentam a topologia e
+# são validados no CI (kubeconform). Para aplicar manualmente:
+#   kubectl apply -f k8s/
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: execution-app
+  namespace: execution
+  labels:
+    app: execution-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: execution-app
+  template:
+    metadata:
+      labels:
+        app: execution-app
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+        - name: app
+          image: ghcr.io/vinnytechdevelopment/execution-service-fiap:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: execution-config
+            - secretRef:
+                name: execution-secret
+          readinessProbe:
+            httpGet: { path: /up, port: 8000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /up, port: 8000 }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 100m, memory: 192Mi }
+            limits: { cpu: 500m, memory: 384Mi }

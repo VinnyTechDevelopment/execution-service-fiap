@@ -1,0 +1,21 @@
+# Manifestos Kubernetes do execution-service (Fase 4).
+# Em EKS o deploy é feito pelo Terraform em infra/ (mesmos recursos, com
+# valores reais de banco/fila/secret); estes YAMLs documentam a topologia e
+# são validados no CI (kubeconform). Para aplicar manualmente:
+#   kubectl apply -f k8s/
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: execution-app
+  namespace: execution
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+spec:
+  type: LoadBalancer
+  selector:
+    app: execution-app
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8000

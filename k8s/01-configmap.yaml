@@ -1,0 +1,22 @@
+# Manifestos Kubernetes do execution-service (Fase 4).
+# Em EKS o deploy é feito pelo Terraform em infra/ (mesmos recursos, com
+# valores reais de banco/fila/secret); estes YAMLs documentam a topologia e
+# são validados no CI (kubeconform). Para aplicar manualmente:
+#   kubectl apply -f k8s/
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: execution-config
+  namespace: execution
+data:
+  APP_NAME: "execution-service"
+  APP_ENV: "production"
+  DB_CONNECTION: "sqlite"
+  DYNAMODB_TABLE_PREFIX: "production-execution"
+  MESSAGING_DRIVER: "sqs"
+  MESSAGING_QUEUE_PREFIX: "production"
+  AWS_DEFAULT_REGION: "us-east-1"
+  NEWRELIC_APPNAME: "execution-service"
+  LOG_CHANNEL: "stack"
+  LOG_STACK: "stderr"

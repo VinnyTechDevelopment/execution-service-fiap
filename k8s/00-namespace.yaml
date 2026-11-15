@@ -1,0 +1,12 @@
+# Manifestos Kubernetes do execution-service (Fase 4).
+# Em EKS o deploy é feito pelo Terraform em infra/ (mesmos recursos, com
+# valores reais de banco/fila/secret); estes YAMLs documentam a topologia e
+# são validados no CI (kubeconform). Para aplicar manualmente:
+#   kubectl apply -f k8s/
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: execution
+  labels:
+    service: execution-service
