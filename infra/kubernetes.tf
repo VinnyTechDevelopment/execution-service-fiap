@@ -84,6 +84,16 @@ resource "kubernetes_deployment_v1" "app" {
   spec {
     replicas = 2
 
+    # Com hostNetwork cada node comporta 1 réplica (porta 8000 do host):
+    # troca uma por vez, sem pod extra.
+    strategy {
+      type = "RollingUpdate"
+      rolling_update {
+        max_surge       = 0
+        max_unavailable = 1
+      }
+    }
+
     selector {
       match_labels = local.labels
     }
@@ -95,6 +105,12 @@ resource "kubernetes_deployment_v1" "app" {
       }
 
       spec {
+        # hostNetwork: o pod usa a rede do node e alcança o IMDS (credenciais
+        # da LabRole) com o hop limit 1 padrão. No AWS Academy não dá para usar
+        # IRSA nem aumentar o hop limit (launch template customizado é negado).
+        host_network = true
+        dns_policy   = "ClusterFirstWithHostNet"
+
         image_pull_secrets {
           name = kubernetes_secret_v1.ghcr.metadata[0].name
         }
@@ -174,6 +190,12 @@ resource "kubernetes_deployment_v1" "worker" {
       }
 
       spec {
+        # hostNetwork: o pod usa a rede do node e alcança o IMDS (credenciais
+        # da LabRole) com o hop limit 1 padrão. No AWS Academy não dá para usar
+        # IRSA nem aumentar o hop limit (launch template customizado é negado).
+        host_network = true
+        dns_policy   = "ClusterFirstWithHostNet"
+
         image_pull_secrets {
           name = kubernetes_secret_v1.ghcr.metadata[0].name
         }
