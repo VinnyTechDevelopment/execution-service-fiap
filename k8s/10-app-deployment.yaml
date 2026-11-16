@@ -13,6 +13,9 @@ metadata:
     app: execution-app
 spec:
   replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }
   selector:
     matchLabels:
       app: execution-app
@@ -21,6 +24,9 @@ spec:
       labels:
         app: execution-app
     spec:
+      # rede do node: acesso ao IMDS (credenciais da LabRole) com hop limit 1
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       imagePullSecrets:
         - name: ghcr-secret
       containers:
